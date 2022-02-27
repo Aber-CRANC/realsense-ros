@@ -64,7 +64,7 @@ namespace realsense2_camera
     const stream_index_pair ACCEL{RS2_STREAM_ACCEL, 0};
     const stream_index_pair POSE{RS2_STREAM_POSE, 0};
     const stream_index_pair CONFIDENCE{RS2_STREAM_CONFIDENCE, 0};
-    
+
 
     const std::vector<stream_index_pair> IMAGE_STREAMS = {DEPTH, INFRA0, INFRA1, INFRA2,
                                                           COLOR,
@@ -106,7 +106,7 @@ namespace realsense2_camera
             void Publish(sensor_msgs::msg::Imu msg);     //either send or hold message.
             size_t getNumSubscribers();
             void Enable(bool is_enabled) {_is_enabled=is_enabled;};
-        
+
         private:
             void PublishPendingMessages();
 
@@ -271,6 +271,7 @@ namespace realsense2_camera
         double _linear_accel_cov;
         double _angular_velocity_cov;
         bool  _hold_back_imu_for_frames;
+        short _frames_ignored;
 
         std::map<stream_index_pair, rs2_intrinsics> _stream_intrinsics;
         std::map<stream_index_pair, int> _width;
@@ -291,7 +292,7 @@ namespace realsense2_camera
         std::condition_variable _cv_tf, _update_functions_cv;
 
         std::map<stream_index_pair, image_transport::Publisher> _image_publishers;
-        
+
         std::map<stream_index_pair, rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr> _imu_publishers;
         std::shared_ptr<rclcpp::Publisher<nav_msgs::msg::Odometry>> _odom_publisher;
         std::shared_ptr<SyncedImuPublisher> _synced_imu_publisher;

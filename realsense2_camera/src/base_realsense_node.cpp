@@ -425,7 +425,7 @@ void BaseRealSenseNode::setupErrorCallback()
             {
                 ROS_WARN_STREAM("Hardware Notification:" << n.get_description() << "," << n.get_timestamp() << "," << n.get_severity() << "," << n.get_category());
             }
-            if (error_strings.end() != find_if(error_strings.begin(), error_strings.end(), [&n] (std::string err)
+            if (error_strings.end() != std::find_if(error_strings.begin(), error_strings.end(), [&n] (std::string err)
                                         {return (n.get_description().find(err) != std::string::npos); }))
             {
                 ROS_ERROR_STREAM("Performing Hardware Reset.");
@@ -1570,9 +1570,14 @@ void BaseRealSenseNode::clip_depth(rs2::depth_frame depth_frame, float clipping_
 {
     uint16_t* p_depth_frame = reinterpret_cast<uint16_t*>(const_cast<void*>(depth_frame.get_data()));
     uint16_t clipping_value = static_cast<uint16_t>(clipping_dist / _depth_scale_meters);
+    uint16_t clipping_value_min = static_cast<uint16_t>(0.8 / _depth_scale_meters);
 
     int width = depth_frame.get_width();
     int height = depth_frame.get_height();
+
+    int min_width_clipping = (2 * width / 6) + 18; // "18" is an offset to correct for the depth frame not being centered
+    int max_width_clipping = (4 * width / 6) + 18;
+
 
     #ifdef _OPENMP
     #pragma omp parallel for schedule(dynamic) //Using OpenMP to try to parallelise the loop
@@ -1580,12 +1585,25 @@ void BaseRealSenseNode::clip_depth(rs2::depth_frame depth_frame, float clipping_
     for (int y = 0; y < height; y++)
     {
         auto depth_pixel_index = y * width;
+
+        auto min_index = depth_pixel_index + min_width_clipping;
+        auto max_index = depth_pixel_index + max_width_clipping;
+
         for (int x = 0; x < width; x++, ++depth_pixel_index)
         {
             // Check if the depth value is greater than the threashold
             if (p_depth_frame[depth_pixel_index] > clipping_value)
             {
                 p_depth_frame[depth_pixel_index] = 0; //Set to invalid (<=0) value.
+            }
+            // Check if the depth value is smaller than the threshold
+            else if (p_depth_frame[depth_pixel_index] < clipping_value_min)
+            {
+                if (y > height / 1.5) {
+                    if (depth_pixel_index > min_index && depth_pixel_index < max_index) {
+                        p_depth_frame[depth_pixel_index] = 0; //Set to invalid (<=0) value.
+                    }
+                }
             }
         }
     }
@@ -1866,6 +1884,12 @@ void BaseRealSenseNode::pose_callback(rs2::frame frame)
 
 void BaseRealSenseNode::frame_callback(rs2::frame frame)
 {
+    if (_frames_ignored < 5) {
+        _frames_ignored++;
+        return;
+    }
+    _frames_ignored = 0;
+
     _synced_imu_publisher->Pause();
 
     try{
@@ -1943,7 +1967,7 @@ void BaseRealSenseNode::frame_callback(rs2::frame frame)
                         publishFrame(f, t, COLOR,
                                     _depth_aligned_image,
                                     _depth_aligned_info_publisher,
-                                    _depth_aligned_image_publishers, 
+                                    _depth_aligned_image_publishers,
                                     false,
                                     _depth_aligned_seq,
                                     _depth_aligned_camera_info,
@@ -1955,7 +1979,7 @@ void BaseRealSenseNode::frame_callback(rs2::frame frame)
                                 sip,
                                 _image,
                                 _info_publisher,
-                                _image_publishers, 
+                                _image_publishers,
                                 true,
                                 _seq,
                                 _camera_info,
@@ -2054,7 +2078,7 @@ rclcpp::Time BaseRealSenseNode::frameSystemTimeSec(rs2::frame frame)
         rclcpp::Duration elapsed_camera(rclcpp::Duration::from_nanoseconds(elapsed_camera_ns));
 #else
         rclcpp::Duration elapsed_camera(elapsed_camera_ns);
-#endif        
+#endif
         return rclcpp::Time(_ros_time_base + elapsed_camera);
     }
     else
@@ -2427,7 +2451,7 @@ void BaseRealSenseNode::publishPointCloud(rs2::points pc, const rclcpp::Time& t,
     {
         std::set<rs2_format> available_formats{ rs2_format::RS2_FORMAT_RGB8, rs2_format::RS2_FORMAT_Y8 };
 
-        texture_frame_itr = find_if(frameset.begin(), frameset.end(), [&texture_source_id, &available_formats] (rs2::frame f)
+        texture_frame_itr = std::find_if(frameset.begin(), frameset.end(), [&texture_source_id, &available_formats] (rs2::frame f)
                                 {return (rs2_stream(f.get_profile().stream_type()) == texture_source_id) &&
                                             (available_formats.find(f.get_profile().format()) != available_formats.end()); });
         if (texture_frame_itr == frameset.end())
@@ -2618,6 +2642,7 @@ void BaseRealSenseNode::publishFrame(rs2::frame f, const rclcpp::Time& t,
                                      std::map<stream_index_pair, sensor_msgs::msg::CameraInfo>& camera_info,
                                      const std::map<rs2_stream, std::string>& encoding)
 {
+
     ROS_DEBUG("publishFrame(...)");
     unsigned int width = 0;
     unsigned int height = 0;
@@ -2677,10 +2702,10 @@ void BaseRealSenseNode::publishFrame(rs2::frame f, const rclcpp::Time& t,
 
 void BaseRealSenseNode::publishMetadata(rs2::frame f, const std::string& frame_id)
 {
-    stream_index_pair stream = {f.get_profile().stream_type(), f.get_profile().stream_index()};    
+    stream_index_pair stream = {f.get_profile().stream_type(), f.get_profile().stream_index()};
     if (_metadata_publishers.find(stream) != _metadata_publishers.end())
     {
-        rclcpp::Time t(frameSystemTimeSec(f));    
+        rclcpp::Time t(frameSystemTimeSec(f));
         auto& md_publisher = _metadata_publishers.at(stream);
         if (0 != md_publisher->get_subscription_count())
         {
