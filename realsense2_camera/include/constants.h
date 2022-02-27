@@ -7,7 +7,7 @@
 
 #define REALSENSE_ROS_MAJOR_VERSION    3
 #define REALSENSE_ROS_MINOR_VERSION    2
-#define REALSENSE_ROS_PATCH_VERSION    2
+#define REALSENSE_ROS_PATCH_VERSION    3
 
 #define STRINGIFY(arg) #arg
 #define VAR_ARG_STRING(arg) STRINGIFY(arg)
@@ -64,7 +64,7 @@ namespace realsense2_camera
     const uint16_t RS435i_RGB_PID   = 0x0B3A; // AWGC_MM
     const uint16_t RS465_PID        = 0x0b4d; // D465
     const uint16_t RS416_RGB_PID    = 0x0B52; // F416 RGB
-    const uint16_t RS405_PID        = 0x0b0c; // DS5U
+    const uint16_t RS405_PID        = 0x0B5B; // DS5U
     const uint16_t RS455_PID        = 0x0B5C; // D455
     const uint16_t RS_T265_PID      = 0x0b37; // 
     const uint16_t RS_L515_PID_PRE_PRQ = 0x0B3D; // 
@@ -80,6 +80,7 @@ namespace realsense2_camera
 
     const bool PUBLISH_TF        = true;
     const double TF_PUBLISH_RATE = 0; // Static transform
+    const double DIAGNOSTICS_PERIOD = 0; // Static transform
 
     const int IMAGE_WIDTH             = 640;
     const int IMAGE_HEIGHT            = 480;
