@@ -7,6 +7,12 @@
 #include <rclcpp/clock.hpp>
 #include <fstream>
 #include <iomanip>
+#include <cstdlib>
+#include <pwd.h>
+#include <opencv2/imgcodecs.hpp>
+
+#include <pcl/filters/approximate_voxel_grid.h>
+#include <pcl_conversions/pcl_conversions.h>
 
 using namespace realsense2_camera;
 
@@ -128,6 +134,25 @@ SyncedImuPublisher::SyncedImuPublisher(rclcpp::Publisher<sensor_msgs::msg::Imu>:
 SyncedImuPublisher::~SyncedImuPublisher()
 {
     PublishPendingMessages();
+}
+
+pcl::PointCloud<pcl::PointXYZ>::Ptr points_to_pcl(const rs2::points& points)
+{
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
+
+    auto sp = points.get_profile().as<rs2::video_stream_profile>();
+    cloud->width = static_cast<uint32_t>(sp.width());
+    cloud->height = static_cast<uint32_t>(sp.height());
+    cloud->is_dense = false;
+    cloud->points.resize(points.size());
+    auto ptr = points.get_vertices();
+    for (size_t i = 0; i < points.size(); ++i) {
+        cloud->points[i].x = ptr[i].x;
+        cloud->points[i].y = ptr[i].y;
+        cloud->points[i].z = ptr[i].z;
+    }
+
+    return cloud;
 }
 
 void SyncedImuPublisher::Publish(sensor_msgs::msg::Imu imu_msg)
@@ -256,6 +281,13 @@ BaseRealSenseNode::BaseRealSenseNode(rclcpp::Node& node,
     _stream_name[RS2_STREAM_POSE] = "pose";
 
     _monitor_options = {RS2_OPTION_ASIC_TEMPERATURE, RS2_OPTION_PROJECTOR_TEMPERATURE};
+
+
+    if (getenv("HOME") == NULL) {
+        home_directory_ = getpwuid(getuid())->pw_dir;
+    } else {
+        home_directory_ = getenv("HOME");
+    }
 
     try
     {
@@ -1972,7 +2004,7 @@ void BaseRealSenseNode::frame_callback(rs2::frame frame)
                     sent_depth_frame = true;
                     if (_align_depth)
                     {
-                        publishFrame(f, t, COLOR,
+                        publishFrameGuard(f, t, COLOR,
                                     _depth_aligned_image,
                                     _depth_aligned_info_publisher,
                                     _depth_aligned_image_publishers,
@@ -1983,7 +2015,7 @@ void BaseRealSenseNode::frame_callback(rs2::frame frame)
                         continue;
                     }
                 }
-                publishFrame(f, t,
+                publishFrameGuard(f, t,
                                 sip,
                                 _image,
                                 _info_publisher,
@@ -2001,7 +2033,7 @@ void BaseRealSenseNode::frame_callback(rs2::frame frame)
                 else
                     frame_to_send = original_depth_frame;
 
-                publishFrame(frame_to_send, t,
+                publishFrameGuard(frame_to_send, t,
                                 DEPTH,
                                 _image,
                                 _info_publisher,
@@ -2028,7 +2060,7 @@ void BaseRealSenseNode::frame_callback(rs2::frame frame)
                     clip_depth(frame, _clipping_distance);
                 }
             }
-            publishFrame(frame, t,
+            publishFrameGuard(frame, t,
                             sip,
                             _image,
                             _info_publisher,
@@ -2446,146 +2478,26 @@ void reverse_memcpy(unsigned char* dst, const unsigned char* src, size_t n)
 
 }
 
-void BaseRealSenseNode::publishPointCloud(rs2::points pc, const rclcpp::Time& t, const rs2::frameset& frameset)
+void BaseRealSenseNode::publishPointCloud(rs2::points pc, const rclcpp::Time& t, const rs2::frameset& /*frameset*/)
 {
-    if (0 == _pointcloud_publisher->get_subscription_count())
-        return;
+    // if (0 == _pointcloud_publisher->get_subscription_count() && 0 == _pointcloud_publisher->get_intra_process_subscription_count())
+    //     return;
     ROS_INFO_STREAM_ONCE("publishing " << (_ordered_pc ? "" : "un") << "ordered pointcloud.");
 
-    rs2_stream texture_source_id = static_cast<rs2_stream>(_pointcloud_filter->get_option(rs2_option::RS2_OPTION_STREAM_FILTER));
-    bool use_texture = texture_source_id != RS2_STREAM_ANY;
-    static int warn_count(0);
-    static const int DISPLAY_WARN_NUMBER(5);
-    rs2::frameset::iterator texture_frame_itr = frameset.end();
-    if (use_texture)
-    {
-        std::set<rs2_format> available_formats{ rs2_format::RS2_FORMAT_RGB8, rs2_format::RS2_FORMAT_Y8 };
+    auto pcl_points = points_to_pcl(pc);
+    pcl::PointCloud<pcl::PointXYZ> result;
+    pcl::ApproximateVoxelGrid<pcl::PointXYZ> approximate_voxel_filter;
+    approximate_voxel_filter.setLeafSize(0.05, 0.05, 0.05);
+    approximate_voxel_filter.setDownsampleAllData(false);
+    approximate_voxel_filter.setInputCloud(pcl_points);
+    approximate_voxel_filter.filter(result);
 
-        texture_frame_itr = std::find_if(frameset.begin(), frameset.end(), [&texture_source_id, &available_formats] (rs2::frame f)
-                                {return (rs2_stream(f.get_profile().stream_type()) == texture_source_id) &&
-                                            (available_formats.find(f.get_profile().format()) != available_formats.end()); });
-        if (texture_frame_itr == frameset.end())
-        {
-            warn_count++;
-            std::string texture_source_name = _pointcloud_filter->get_option_value_description(rs2_option::RS2_OPTION_STREAM_FILTER, static_cast<float>(texture_source_id));
-            ROS_WARN_STREAM_COND(warn_count == DISPLAY_WARN_NUMBER, "No stream match for pointcloud chosen texture " << texture_source_name);
-            return;
-        }
-        warn_count = 0;
-    }
+    auto msg = std::make_unique<sensor_msgs::msg::PointCloud2>();
+    pcl::toROSMsg(result, *msg);
+    msg->header.frame_id = _optical_frame_id[DEPTH];
+    msg->header.stamp = t;
 
-    int texture_width(0), texture_height(0);
-    int num_colors(0);
-
-    const rs2::vertex* vertex = pc.get_vertices();
-    const rs2::texture_coordinate* color_point = pc.get_texture_coordinates();
-
-    rs2_intrinsics depth_intrin = pc.get_profile().as<rs2::video_stream_profile>().get_intrinsics();
-
-    sensor_msgs::PointCloud2Modifier modifier(_msg_pointcloud);
-    modifier.setPointCloud2FieldsByString(1, "xyz");
-    modifier.resize(pc.size());
-    if (_ordered_pc)
-    {
-        _msg_pointcloud.width = depth_intrin.width;
-        _msg_pointcloud.height = depth_intrin.height;
-        _msg_pointcloud.is_dense = false;
-    }
-
-    vertex = pc.get_vertices();
-    size_t valid_count(0);
-    if (use_texture)
-    {
-        rs2::video_frame texture_frame = (*texture_frame_itr).as<rs2::video_frame>();
-        texture_width = texture_frame.get_width();
-        texture_height = texture_frame.get_height();
-        num_colors = texture_frame.get_bytes_per_pixel();
-        uint8_t* color_data = (uint8_t*)texture_frame.get_data();
-        std::string format_str;
-        switch(texture_frame.get_profile().format())
-        {
-            case RS2_FORMAT_RGB8:
-                format_str = "rgb";
-                break;
-            case RS2_FORMAT_Y8:
-                format_str = "intensity";
-                break;
-            default:
-                throw std::runtime_error("Unhandled texture format passed in pointcloud " + std::to_string(texture_frame.get_profile().format()));
-        }
-        _msg_pointcloud.point_step = addPointField(_msg_pointcloud, format_str.c_str(), 1, sensor_msgs::msg::PointField::FLOAT32, _msg_pointcloud.point_step);
-        _msg_pointcloud.row_step = _msg_pointcloud.width * _msg_pointcloud.point_step;
-        _msg_pointcloud.data.resize(_msg_pointcloud.height * _msg_pointcloud.row_step);
-
-        sensor_msgs::PointCloud2Iterator<float>iter_x(_msg_pointcloud, "x");
-        sensor_msgs::PointCloud2Iterator<float>iter_y(_msg_pointcloud, "y");
-        sensor_msgs::PointCloud2Iterator<float>iter_z(_msg_pointcloud, "z");
-        sensor_msgs::PointCloud2Iterator<uint8_t>iter_color(_msg_pointcloud, format_str);
-        color_point = pc.get_texture_coordinates();
-
-        float color_pixel[2];
-        for (size_t point_idx=0; point_idx < pc.size(); point_idx++, vertex++, color_point++)
-        {
-            float i(color_point->u);
-            float j(color_point->v);
-            bool valid_color_pixel(i >= 0.f && i <=1.f && j >= 0.f && j <=1.f);
-            bool valid_pixel(vertex->z > 0 && (valid_color_pixel || _allow_no_texture_points));
-            if (valid_pixel || _ordered_pc)
-            {
-                *iter_x = vertex->x;
-                *iter_y = vertex->y;
-                *iter_z = vertex->z;
-
-                if (valid_color_pixel)
-                {
-                    color_pixel[0] = i * texture_width;
-                    color_pixel[1] = j * texture_height;
-                    int pixx = static_cast<int>(color_pixel[0]);
-                    int pixy = static_cast<int>(color_pixel[1]);
-                    int offset = (pixy * texture_width + pixx) * num_colors;
-                    reverse_memcpy(&(*iter_color), color_data+offset, num_colors);  // PointCloud2 order of rgb is bgr.
-                }
-                ++iter_x; ++iter_y; ++iter_z;
-                ++iter_color;
-                ++valid_count;
-            }
-        }
-    }
-    else
-    {
-        std::string format_str = "intensity";
-        _msg_pointcloud.row_step = _msg_pointcloud.width * _msg_pointcloud.point_step;
-        _msg_pointcloud.data.resize(_msg_pointcloud.height * _msg_pointcloud.row_step);
-
-        sensor_msgs::PointCloud2Iterator<float>iter_x(_msg_pointcloud, "x");
-        sensor_msgs::PointCloud2Iterator<float>iter_y(_msg_pointcloud, "y");
-        sensor_msgs::PointCloud2Iterator<float>iter_z(_msg_pointcloud, "z");
-
-        for (size_t point_idx=0; point_idx < pc.size(); point_idx++, vertex++)
-        {
-            bool valid_pixel(vertex->z > 0);
-            if (valid_pixel || _ordered_pc)
-            {
-                *iter_x = vertex->x;
-                *iter_y = vertex->y;
-                *iter_z = vertex->z;
-
-                ++iter_x; ++iter_y; ++iter_z;
-                ++valid_count;
-            }
-        }
-    }
-    _msg_pointcloud.header.stamp = t;
-    if (_align_depth) _msg_pointcloud.header.frame_id = _optical_frame_id[COLOR];
-    else              _msg_pointcloud.header.frame_id = _optical_frame_id[DEPTH];
-    if (!_ordered_pc)
-    {
-        _msg_pointcloud.width = valid_count;
-        _msg_pointcloud.height = 1;
-        _msg_pointcloud.is_dense = true;
-        modifier.resize(valid_count);
-    }
-    _pointcloud_publisher->publish(_msg_pointcloud);
+    _pointcloud_publisher->publish(std::move(msg));
 }
 
 
@@ -2652,7 +2564,6 @@ void BaseRealSenseNode::publishFrame(rs2::frame f, const rclcpp::Time& t,
                                      std::map<stream_index_pair, sensor_msgs::msg::CameraInfo>& camera_info,
                                      const std::map<rs2_stream, std::string>& encoding)
 {
-
     ROS_DEBUG("publishFrame(...)");
     unsigned int width = 0;
     unsigned int height = 0;
@@ -2680,34 +2591,70 @@ void BaseRealSenseNode::publishFrame(rs2::frame f, const rclcpp::Time& t,
     ++(seq[stream]);
     auto& info_publisher = info_publishers.at(stream);
     auto& image_publisher = image_publishers.at(stream);
-    if(0 != info_publisher->get_subscription_count() ||
-       0 != image_publisher.getNumSubscribers())
-    {
-        auto& cam_info = camera_info.at(stream);
-        if (cam_info.width != width)
-        {
-            updateStreamCalibData(f.get_profile().as<rs2::video_stream_profile>());
-        }
-        cam_info.header.stamp = t;
-        info_publisher->publish(cam_info);
 
-        sensor_msgs::msg::Image::SharedPtr img;
-        img = cv_bridge::CvImage(std_msgs::msg::Header(), encoding.at(stream.first), image).toImageMsg();
-        img->width = width;
-        img->height = height;
-        img->is_bigendian = false;
-        img->step = width * bpp;
-        img->header.frame_id = cam_info.header.frame_id;
-        img->header.stamp = t;
 
-        image_publisher.publish(img);
-        ROS_DEBUG("%s stream published", rs2_stream_to_string(f.get_profile().stream_type()));
-    }
-    if (is_publishMetadata)
+    auto& cam_info = camera_info.at(stream);
+    if (cam_info.width != width)
     {
-        auto& cam_info = camera_info.at(stream);
-        publishMetadata(f, cam_info.header.frame_id);
+        updateStreamCalibData(f.get_profile().as<rs2::video_stream_profile>());
     }
+    cam_info.header.stamp = t;
+    info_publisher->publish(cam_info);
+    time_t time_now = t.seconds();
+    char time_buffer[25];
+    strftime(time_buffer, sizeof(time_buffer), "%Y%m%dT%H%M%S%z", gmtime(&time_now));
+
+    auto img = std::make_unique<sensor_msgs::msg::Image>();
+    auto cv_img = cv_bridge::CvImage(std_msgs::msg::Header(), encoding.at(stream.first), image);
+    cv_img.toImageMsg(*img);
+
+    img->width = width;
+    img->height = height;
+    img->is_bigendian = false;
+    img->step = width * bpp;
+    img->header.frame_id = cam_info.header.frame_id;
+    img->header.stamp = t;
+
+    image_publisher.publish(std::move(img));
+    
+    std::string img_file_path = home_directory_ + "/cranc_data/images/" + std::string(time_buffer) + "_cranc_image.tiff";  // TODO(SivertHavso): replace cranc_data with parameter
+    if (!cv::imwrite(img_file_path, image)) {
+        RCLCPP_WARN(_node.get_logger(), "Failed to save image: %s", img_file_path.c_str());
+    }
+
+    ROS_DEBUG("%s stream published", rs2_stream_to_string(f.get_profile().stream_type()));
+
+    // if (is_publishMetadata)
+    // {
+    //     auto& cam_info = camera_info.at(stream);
+    //     publishMetadata(f, cam_info.header.frame_id);
+    // }
+
+}
+
+void BaseRealSenseNode::publishFrameGuard(rs2::frame f, const rclcpp::Time& t,
+                                     const stream_index_pair& stream,
+                                     std::map<stream_index_pair, cv::Mat>& images,
+                                     const std::map<stream_index_pair, rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr>& info_publishers,
+                                     const std::map<stream_index_pair, image_transport::Publisher>& image_publishers,
+                                     const bool is_publishMetadata,
+                                     std::map<stream_index_pair, int>& seq,
+                                     std::map<stream_index_pair, sensor_msgs::msg::CameraInfo>& camera_info,
+                                     const std::map<rs2_stream, std::string>& encoding)
+{
+    static rclcpp::Time time_previous_color;
+    static rclcpp::Time time_previous_infra;
+
+    if (f.get_profile() == RS2_STREAM_COLOR && (t - time_previous_color).nanoseconds() > RCL_S_TO_NS(5)) {
+        publishFrame(f, t, stream, images, info_publishers, image_publishers, is_publishMetadata, seq, camera_info, encoding);
+        time_previous_color = t;
+    }
+    if (f.get_profile() == RS2_STREAM_INFRARED && (t - time_previous_infra).nanoseconds() > RCL_S_TO_NS(5)) {
+        publishFrame(f, t, stream, images, info_publishers, image_publishers, is_publishMetadata, seq, camera_info, encoding);
+        time_previous_infra = t;
+    }
+
+
 }
 
 void BaseRealSenseNode::publishMetadata(rs2::frame f, const std::string& frame_id)

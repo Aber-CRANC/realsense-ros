@@ -47,6 +47,10 @@
 #include <atomic>
 #include <thread>
 
+#include <pcl/point_types.h>
+#include <pcl/point_cloud.h>
+
+
 using realsense2_camera_msgs::msg::Extrinsics;
 using realsense2_camera_msgs::msg::IMUInfo;
 
@@ -74,6 +78,8 @@ namespace realsense2_camera
                                                           FISHEYE1, FISHEYE2, CONFIDENCE};
 
     const std::vector<stream_index_pair> HID_STREAMS = {GYRO, ACCEL, POSE};
+
+    // pcl::PointCloud<pcl::PointXYZ>::Ptr points_to_pcl(const rs2::points& points);
 
     class NamedFilter
     {
@@ -230,6 +236,17 @@ namespace realsense2_camera
                           std::map<stream_index_pair, int>& seq,
                           std::map<stream_index_pair, sensor_msgs::msg::CameraInfo>& camera_info,
                           const std::map<rs2_stream, std::string>& encoding);
+
+        void publishFrameGuard(rs2::frame f, const rclcpp::Time& t,
+                          const stream_index_pair& stream,
+                          std::map<stream_index_pair, cv::Mat>& images,
+                          const std::map<stream_index_pair, rclcpp::Publisher<sensor_msgs::msg::CameraInfo>::SharedPtr>& info_publishers,
+                          const std::map<stream_index_pair, image_transport::Publisher>& image_publishers,
+                          const bool is_publishMetadata,
+                          std::map<stream_index_pair, int>& seq,
+                          std::map<stream_index_pair, sensor_msgs::msg::CameraInfo>& camera_info,
+                          const std::map<rs2_stream, std::string>& encoding);
+
         void publishMetadata(rs2::frame f, const std::string& frame_id);
         
         bool getEnabledProfile(const stream_index_pair& stream_index, rs2::stream_profile& profile);
@@ -328,6 +345,7 @@ namespace realsense2_camera
         std::vector<NamedFilter> _filters;
         std::shared_ptr<rs2::filter> _colorizer, _pointcloud_filter;
         std::vector<rs2::sensor> _dev_sensors;
+        std::string home_directory_;
 
         std::map<stream_index_pair, cv::Mat> _depth_aligned_image;
         std::map<stream_index_pair, cv::Mat> _depth_scaled_image;

@@ -98,6 +98,8 @@ find_package(nav_msgs REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(diagnostic_updater REQUIRED)
+find_package(PCL REQUIRED) 
+find_package(pcl_conversions REQUIRED)
 
 find_package(realsense2 2.50.0)
 if(NOT realsense2_FOUND)
@@ -105,7 +107,9 @@ if(NOT realsense2_FOUND)
 endif()
 
 #set(CMAKE_NO_SYSTEM_FROM_IMPORTED true)
-include_directories(include)
+include_directories(include ${PCL_INCLUDE_DIRS})
+link_directories(${PCL_LIBRARY_DIRS})
+add_definitions(${PCL_DEFINITIONS})
 
 set(node_plugins "")
 
@@ -155,6 +159,7 @@ add_library(${PROJECT_NAME} SHARED
 
 target_link_libraries(${PROJECT_NAME}
     ${realsense2_LIBRARY}
+    ${PCL_LIBRARIES}
     )
 
 set(dependencies
@@ -171,6 +176,7 @@ set(dependencies
   realsense2
   tf2_ros
   diagnostic_updater
+  pcl_conversions
 )
 
 ament_target_dependencies(${PROJECT_NAME}
